@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft. All rights reserved.
 
 import asyncio
+import time
 from random import randrange
 from typing import TYPE_CHECKING, Annotated, Any
 
@@ -18,19 +19,41 @@ It shows how to handle function call approvals without using threads.
 """
 
 conditions = ["sunny", "cloudy", "raining", "snowing", "clear"]
+simulate_delay_seconds = 5
 
-
-@ai_function
-def get_weather(location: Annotated[str, "The city and state, e.g. San Francisco, CA"]) -> str:
+@ai_function(approval_mode="always_require")
+async def get_weather(location: Annotated[str, "The city and state, e.g. San Francisco, CA"]) -> str:
     """Get the current weather for a given location."""
+    # Simulate slow operation with cancellable sleep
+    start_time = time.time()
+    print(f"\n[Tool executing: get_weather for {location}. Press Ctrl+C to cancel...]")
+    try:
+        await asyncio.sleep(simulate_delay_seconds)
+        duration = time.time() - start_time
+        print(f"[Tool completed successfully in {duration:.2f} seconds]")
+    except asyncio.CancelledError:
+        duration = time.time() - start_time
+        print(f"\n[Tool execution cancelled after {duration:.2f} seconds]")
+        raise
     # Simulate weather data
     return f"The weather in {location} is {conditions[randrange(0, len(conditions))]} and {randrange(-10, 30)}°C."
 
 
 # Define a simple weather tool that requires approval
 @ai_function(approval_mode="always_require")
-def get_weather_detail(location: Annotated[str, "The city and state, e.g. San Francisco, CA"]) -> str:
+async def get_weather_detail(location: Annotated[str, "The city and state, e.g. San Francisco, CA"]) -> str:
     """Get the current weather for a given location."""
+    # Simulate slow operation with cancellable sleep
+    start_time = time.time()
+    print(f"\n[Tool executing: get_weather_detail for {location}. Press Ctrl+C to cancel...]")
+    try:
+        await asyncio.sleep(simulate_delay_seconds)
+        duration = time.time() - start_time
+        print(f"[Tool completed successfully in {duration:.2f} seconds]")
+    except asyncio.CancelledError:
+        duration = time.time() - start_time
+        print(f"\n[Tool execution cancelled after {duration:.2f} seconds]")
+        raise
     # Simulate weather data
     return (
         f"The weather in {location} is {conditions[randrange(0, len(conditions))]} and {randrange(-10, 30)}°C, "
@@ -45,64 +68,15 @@ async def handle_approvals(query: str, agent: "AgentProtocol") -> AgentRunRespon
     When we don't have a thread, we need to ensure we include the original query,
     the approval request, and the approval response in each iteration.
     """
-    result = await agent.run(query)
-    while len(result.user_input_requests) > 0:
-        # Start with the original query
-        new_inputs: list[Any] = [query]
-
-        for user_input_needed in result.user_input_requests:
-            print(
-                f"\nUser Input Request for function from {agent.name}:"
-                f"\n  Function: {user_input_needed.function_call.name}"
-                f"\n  Arguments: {user_input_needed.function_call.arguments}"
-            )
-
-            # Add the assistant message with the approval request
-            new_inputs.append(ChatMessage(role="assistant", contents=[user_input_needed]))
-
-            # Get user approval
-            user_approval = await asyncio.to_thread(input, "\nApprove function call? (y/n): ")
-
-            # Add the user's approval response
-            new_inputs.append(
-                ChatMessage(role="user", contents=[user_input_needed.create_response(user_approval.lower() == "y")])
-            )
-
-        # Run again with all the context
-        result = await agent.run(new_inputs)
-
-    return result
-
-
-async def handle_approvals_streaming(query: str, agent: "AgentProtocol") -> None:
-    """Handle function call approvals with streaming responses.
-
-    When we don't have a thread, we need to ensure we include the original query,
-    the approval request, and the approval response in each iteration.
-    """
-    current_input: str | list[Any] = query
-    has_user_input_requests = True
-    while has_user_input_requests:
-        has_user_input_requests = False
-        user_input_requests: list[Any] = []
-
-        # Stream the response
-        async for chunk in agent.run_stream(current_input):
-            if chunk.text:
-                print(chunk.text, end="", flush=True)
-
-            # Collect user input requests from the stream
-            if chunk.user_input_requests:
-                user_input_requests.extend(chunk.user_input_requests)
-
-        if user_input_requests:
-            has_user_input_requests = True
+    try:
+        result = await agent.run(query)
+        while len(result.user_input_requests) > 0:
             # Start with the original query
             new_inputs: list[Any] = [query]
 
-            for user_input_needed in user_input_requests:
+            for user_input_needed in result.user_input_requests:
                 print(
-                    f"\n\nUser Input Request for function from {agent.name}:"
+                    f"\nUser Input Request for function from {agent.name}:"
                     f"\n  Function: {user_input_needed.function_call.name}"
                     f"\n  Arguments: {user_input_needed.function_call.arguments}"
                 )
@@ -111,20 +85,90 @@ async def handle_approvals_streaming(query: str, agent: "AgentProtocol") -> None
                 new_inputs.append(ChatMessage(role="assistant", contents=[user_input_needed]))
 
                 # Get user approval
-                user_approval = await asyncio.to_thread(input, "\nApprove function call? (y/n): ")
+                user_approval = await asyncio.to_thread(input, "\nApprove function call? (y - approve/n - deny / c to cancel): ")
+                
+                # Check for cancellation
+                if user_approval.lower() == "c":
+                    print("\n[User cancelled the operation]")
+                    raise asyncio.CancelledError("User requested cancellation")
 
                 # Add the user's approval response
                 new_inputs.append(
                     ChatMessage(role="user", contents=[user_input_needed.create_response(user_approval.lower() == "y")])
                 )
 
-            # Update input with all the context for next iteration
-            current_input = new_inputs
+            # Run again with all the context
+            result = await agent.run(new_inputs)
+
+        return result
+    except KeyboardInterrupt:
+        print("\n[Operation cancelled by user (Ctrl+C)]")
+        raise asyncio.CancelledError("Cancelled by keyboard interrupt")
+
+
+async def handle_approvals_streaming(query: str, agent: "AgentProtocol") -> None:
+    """Handle function call approvals with streaming responses.
+
+    When we don't have a thread, we need to ensure we include the original query,
+    the approval request, and the approval response in each iteration.
+    """
+    try:
+        current_input: str | list[Any] = query
+        has_user_input_requests = True
+        while has_user_input_requests:
+            has_user_input_requests = False
+            user_input_requests: list[Any] = []
+
+            # Stream the response
+            async for chunk in agent.run_stream(current_input):
+                if chunk.text:
+                    print(chunk.text, end="", flush=True)
+
+                # Collect user input requests from the stream
+                if chunk.user_input_requests:
+                    user_input_requests.extend(chunk.user_input_requests)
+
+            if user_input_requests:
+                has_user_input_requests = True
+                # Start with the original query
+                new_inputs: list[Any] = [query]
+
+                for user_input_needed in user_input_requests:
+                    print(
+                        f"\n\nUser Input Request for function from {agent.name}:"
+                        f"\n  Function: {user_input_needed.function_call.name}"
+                        f"\n  Arguments: {user_input_needed.function_call.arguments}"
+                    )
+
+                    # Add the assistant message with the approval request
+                    new_inputs.append(ChatMessage(role="assistant", contents=[user_input_needed]))
+
+                    # Get user approval
+                    user_approval = await asyncio.to_thread(input, "\nApprove function call? (y/n/c to cancel): ")
+                    
+                    # Check for cancellation
+                    if user_approval.lower() == "c":
+                        print("\n[User cancelled the operation]")
+                        raise asyncio.CancelledError("User requested cancellation")
+
+                    # Add the user's approval response
+                    new_inputs.append(
+                        ChatMessage(role="user", contents=[user_input_needed.create_response(user_approval.lower() == "y")])
+                    )
+
+                # Update input with all the context for next iteration
+                current_input = new_inputs
+    except KeyboardInterrupt:
+        print("\n[Operation cancelled by user (Ctrl+C)]")
+        raise asyncio.CancelledError("Cancelled by keyboard interrupt")
 
 
 async def run_weather_agent_with_approval(is_streaming: bool) -> None:
     """Example showing AI function with approval requirement."""
     print(f"\n=== Weather Agent with Approval Required ({'Streaming' if is_streaming else 'Non-Streaming'}) ===\n")
+    print("Note: You can cancel execution by:")
+    print("  - Pressing Ctrl+C at any time")
+    print("  - Typing 'c' when prompted for approval\n")
 
     async with ChatAgent(
         chat_client=AzureOpenAIResponsesClient(),
@@ -132,22 +176,26 @@ async def run_weather_agent_with_approval(is_streaming: bool) -> None:
         instructions=("You are a helpful weather assistant. Use the get_weather tool to provide weather information."),
         tools=[get_weather, get_weather_detail],
     ) as agent:
-        query = "Can you give me an update of the weather in LA and Portland and detailed weather for Seattle?"
+        query = "Can you give me an update of the weather in Bangkok?"
         print(f"User: {query}")
 
-        if is_streaming:
-            print(f"\n{agent.name}: ", end="", flush=True)
-            await handle_approvals_streaming(query, agent)
-            print()
-        else:
-            result = await handle_approvals(query, agent)
-            print(f"\n{agent.name}: {result}\n")
+        try:
+            if is_streaming:
+                print(f"\n{agent.name}: ", end="", flush=True)
+                await handle_approvals_streaming(query, agent)
+                print()
+            else:
+                result = await handle_approvals(query, agent)
+                print(f"\n{agent.name}: {result}\n")
+        except asyncio.CancelledError:
+            print("\n[Agent execution was cancelled]")
+        except KeyboardInterrupt:
+            print("\n[Agent execution was interrupted]")
 
 
 async def main() -> None:
     print("=== Demonstration of a tool with approvals ===\n")
-
-    await run_weather_agent_with_approval(is_streaming=False)
+    #await run_weather_agent_with_approval(is_streaming=False)
     await run_weather_agent_with_approval(is_streaming=True)
 
 
